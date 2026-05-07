@@ -5,8 +5,11 @@
  *
  * 环境变量:
  *   NVIDIA_API_KEY - NVIDIA API 密钥
- *   CPA_KEY        - 自定义 API 密钥 (如: sk-1234)
- *   CPA_API        - 自定义 API 基础地址 (默认: https://go.xtaoo.cn:8318)
+ *   NVIDIA_FILTERS  - NVIDIA 模型过滤关键词，逗号分隔
+ *                     keyword=包含，!keyword=排除，空值表示不过滤
+ *   CPA_KEY         - 自定义 API 密钥 (如: sk-1234)
+ *   CPA_API         - 自定义 API 基础地址 (默认: https://go.xtaoo.cn:8318)
+ *   CPA_FILTERS     - 同上，作用于 CPA provider
  *
  * 使用方式:
  *   1. 设置 NVIDIA_API_KEY 使用 NVIDIA API
@@ -22,6 +25,7 @@ interface ProviderConfig {
   api: string;
   name: string;
   providerId: string;
+  filterEnvKey?: string;
 }
 
 interface CPAAPIResponse {
@@ -42,6 +46,7 @@ const PROVIDERS = {
     providerId: "nvidia",
     api: "https://integrate.api.nvidia.com",
     envKey: "NVIDIA_API_KEY",
+    filterEnvKey: "NVIDIA_FILTERS",
   },
   cpa: {
     name: "cpa",
@@ -49,6 +54,7 @@ const PROVIDERS = {
     api: "https://go.xtaoo.cn:8318",
     envKey: "CPA_KEY",
     envApi: "CPA_API",
+    filterEnvKey: "CPA_FILTERS",
   },
 };
 
@@ -63,6 +69,7 @@ function getAllProviderConfigs(): ProviderConfig[] {
       api: PROVIDERS.nvidia.api,
       name: PROVIDERS.nvidia.name,
       providerId: PROVIDERS.nvidia.providerId,
+      filterEnvKey: PROVIDERS.nvidia.filterEnvKey,
     });
   }
 
@@ -75,10 +82,67 @@ function getAllProviderConfigs(): ProviderConfig[] {
       api: cpaApi,
       name: PROVIDERS.cpa.name,
       providerId: PROVIDERS.cpa.providerId,
+      filterEnvKey: PROVIDERS.cpa.filterEnvKey,
     });
   }
 
   return configs;
+}
+
+interface ModelFilters {
+  include: string[];
+  exclude: string[];
+}
+
+function parseModelFilters(filterValue?: string): ModelFilters {
+  const filters: ModelFilters = { include: [], exclude: [] };
+
+  if (!filterValue) {
+    return filters;
+  }
+
+  for (const rawPart of filterValue.split(",")) {
+    const part = rawPart.trim();
+    if (!part) continue;
+
+    if (part.startsWith("!")) {
+      const keyword = part.slice(1).trim().toLowerCase();
+      if (keyword) {
+        filters.exclude.push(keyword);
+      }
+      continue;
+    }
+
+    filters.include.push(part.toLowerCase());
+  }
+
+  return filters;
+}
+
+function applyModelFilters(models: Model[], filterValue?: string): Model[] {
+  const filters = parseModelFilters(filterValue);
+  if (filters.include.length === 0 && filters.exclude.length === 0) {
+    return models;
+  }
+
+  return models.filter((model) => {
+    const id = model.id.toLowerCase();
+
+    if (filters.exclude.some((keyword) => id.includes(keyword))) {
+      return false;
+    }
+
+    if (filters.include.length === 0) {
+      return true;
+    }
+
+    return filters.include.some((keyword) => id.includes(keyword));
+  });
+}
+
+function getFilteredModels(config: ProviderConfig, models: Model[]): Model[] {
+  const filterValue = config.filterEnvKey ? process.env[config.filterEnvKey] : undefined;
+  return applyModelFilters(models, filterValue);
 }
 
 async function fetchModelsFromAPI(config: ProviderConfig): Promise<CPAAPIResponse | null> {
@@ -169,8 +233,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       const models = parseModels(response);
+      const filteredModels = getFilteredModels(config, models);
 
-      if (models.length === 0) {
+      if (filteredModels.length === 0) {
         ctx.ui.notify(`[pi-cpa] no models found for ${config.name}`, "error");
         continue;
       }
@@ -181,11 +246,10 @@ export default function (pi: ExtensionAPI) {
         apiKey: config.key,
         api: "openai-completions",
         authHeader: true,
-        models,
+        models: filteredModels,
       });
 
-      const modelNames = models.map(m => m.id).join(", ");
-      ctx.ui.notify(`[pi-cpa] ${config.name}: loaded ${models.length} models`, "info");
+      ctx.ui.notify(`[pi-cpa] ${config.name}: loaded ${filteredModels.length} models`, "info");
     }
   });
 
@@ -205,8 +269,9 @@ export default function (pi: ExtensionAPI) {
         }
 
         const models = parseModels(response);
+        const filteredModels = getFilteredModels(config, models);
 
-        if (models.length === 0) {
+        if (filteredModels.length === 0) {
           ctx.ui.notify(`[pi-cpa] no models found for ${config.name}`, "error");
           return;
         }
@@ -217,10 +282,10 @@ export default function (pi: ExtensionAPI) {
           apiKey: config.key,
           api: "openai-completions",
           authHeader: true,
-          models,
+          models: filteredModels,
         });
 
-        ctx.ui.notify(`[pi-cpa] ${config.name}: refreshed ${models.length} models`, "success");
+        ctx.ui.notify(`[pi-cpa] ${config.name}: refreshed ${filteredModels.length} models`, "success");
       },
     });
   }
