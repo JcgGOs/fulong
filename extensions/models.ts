@@ -10,11 +10,17 @@
  *   CPA_KEY         - 自定义 API 密钥 (如: sk-1234)
  *   CPA_API         - 自定义 API 基础地址 (默认: https://go.xtaoo.cn:8318)
  *   CPA_FILTERS     - 同上，作用于 CPA provider
+ *   OPENROUTER_API_KEY - OpenRouter API 密钥
+ *   OPENROUTER_FREE     - 设为 "1" 时仅保留免费模型 (pricing.prompt="0" && pricing.completion="0")
+ *   OPENCODE_API_KEY    - OpenCode API 密钥
+ *   OPENCODE_FREE       - 设为 "1" 时仅保留免费模型 (model id 包含 "free")
  *
  * 使用方式:
  *   1. 设置 NVIDIA_API_KEY 使用 NVIDIA API
  *   2. 或设置 CPA_KEY 使用自定义 API (可覆盖 CPA_API)
- *   3. 使用 /model 选择对应 provider 下的模型
+ *   3. 设置 OPENROUTER_API_KEY 使用 OpenRouter
+ *   4. 设置 OPENCODE_API_KEY 使用 OpenCode
+ *   5. 使用 /model 选择对应 provider 下的模型
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -35,6 +41,10 @@ interface CPAAPIResponse {
     name?: string;
     created?: number;
     owned_by?: string;
+    pricing?: {
+      prompt: string;
+      completion: string;
+    };
   }>;
   models?: string[];
   object?: string;
@@ -55,6 +65,18 @@ const PROVIDERS = {
     envKey: "CPA_KEY",
     envApi: "CPA_API",
     filterEnvKey: "CPA_FILTERS",
+  },
+  openrouter: {
+    name: "openrouter",
+    providerId: "openrouter",
+    api: "https://openrouter.ai/api",
+    envKey: "OPENROUTER_API_KEY",
+  },
+  opencode: {
+    name: "opencode",
+    providerId: "opencode",
+    api: "https://opencode.ai/zen",
+    envKey: "OPENCODE_API_KEY",
   },
 };
 
@@ -83,6 +105,28 @@ function getAllProviderConfigs(): ProviderConfig[] {
       name: PROVIDERS.cpa.name,
       providerId: PROVIDERS.cpa.providerId,
       filterEnvKey: PROVIDERS.cpa.filterEnvKey,
+    });
+  }
+
+  // 检查 OpenRouter
+  const openrouterKey = process.env[PROVIDERS.openrouter.envKey];
+  if (openrouterKey) {
+    configs.push({
+      key: openrouterKey,
+      api: PROVIDERS.openrouter.api,
+      name: PROVIDERS.openrouter.name,
+      providerId: PROVIDERS.openrouter.providerId,
+    });
+  }
+
+  // 检查 OpenCode
+  const opencodeKey = process.env[PROVIDERS.opencode.envKey];
+  if (opencodeKey) {
+    configs.push({
+      key: opencodeKey,
+      api: PROVIDERS.opencode.api,
+      name: PROVIDERS.opencode.name,
+      providerId: PROVIDERS.opencode.providerId,
     });
   }
 
@@ -168,11 +212,35 @@ async function fetchModelsFromAPI(config: ProviderConfig): Promise<CPAAPIRespons
   }
 }
 
-function parseModels(response: CPAAPIResponse): Model[] {
+/** 检查 OpenRouter 免费过滤条件: 当 OPENROUTER_FREE=1 时只保留免费模型 */
+function shouldFilterOpenRouterFree(): boolean {
+  return process.env["OPENROUTER_FREE"] === "1";
+}
+
+/** 检查 OpenCode 免费过滤条件: 当 OPENCODE_FREE=1 时只保留 id 包含 "free" 的模型 */
+function shouldFilterOpenCodeFree(): boolean {
+  return process.env["OPENCODE_FREE"] === "1";
+}
+
+function parseModels(response: CPAAPIResponse, providerId?: string): Model[] {
   const models: Model[] = [];
 
   if (response.data && Array.isArray(response.data)) {
     for (const model of response.data) {
+      // OpenRouter 免费模式过滤: 仅保留 pricing.prompt="0" && pricing.completion="0" 的模型
+      if (providerId === "openrouter" && shouldFilterOpenRouterFree() && model.pricing) {
+        if (model.pricing.prompt !== "0" || model.pricing.completion !== "0") {
+          continue;
+        }
+      }
+
+      // OpenCode 免费模式过滤: 仅保留 id 包含 "free" 的模型
+      if (providerId === "opencode" && shouldFilterOpenCodeFree()) {
+        if (!model.id.toLowerCase().includes("free")) {
+          continue;
+        }
+      }
+
       models.push({
         id: model.id,
         name: model.name || model.id,
@@ -204,7 +272,7 @@ export default function (pi: ExtensionAPI) {
   const configs = getAllProviderConfigs();
 
   if (configs.length === 0) {
-    console.log("[pi-cpa] enable env: NVIDIA_API_KEY or CPA_KEY");
+    console.log("[pi-cpa] enable env: NVIDIA_API_KEY or CPA_KEY or OPENROUTER_API_KEY or OPENCODE_API_KEY");
     return;
   }
 
@@ -232,7 +300,7 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
 
-      const models = parseModels(response);
+      const models = parseModels(response, config.providerId);
       const filteredModels = getFilteredModels(config, models);
 
       if (filteredModels.length === 0) {
@@ -268,7 +336,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        const models = parseModels(response);
+        const models = parseModels(response, config.providerId);
         const filteredModels = getFilteredModels(config, models);
 
         if (filteredModels.length === 0) {
